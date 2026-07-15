@@ -12,6 +12,7 @@ class BotConfig:
     discord_token: str
     discord_guild_id: int
     absence_channel_id: int
+    member_log_channel_id: int
     google_sheet_id: str
     google_service_account_file: Path
 
@@ -38,6 +39,7 @@ def load_config() -> BotConfig:
         discord_token=_required("DISCORD_TOKEN"),
         discord_guild_id=_required_int("DISCORD_GUILD_ID"),
         absence_channel_id=_required_int("ABSENCE_CHANNEL_ID"),
+        member_log_channel_id=_required_int("MEMBER_LOG_CHANNEL_ID"),
         google_sheet_id=_required("GOOGLE_SHEET_ID"),
         google_service_account_file=Path(_required("GOOGLE_SERVICE_ACCOUNT_FILE")),
     )

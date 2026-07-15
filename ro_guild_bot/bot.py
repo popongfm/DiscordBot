@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import ssl
+from datetime import date
 
 import aiohttp
 import certifi
@@ -13,7 +14,7 @@ from discord.ext import commands
 from ro_guild_bot.classes import RO_CLASSES, autocomplete_classes, resolve_class
 from ro_guild_bot.config import BotConfig, load_config
 from ro_guild_bot.sheets import AbsenceRequest, GuildSheetStore, MemberProfile
-from ro_guild_bot.validation import clean_required_text, parse_date_range
+from ro_guild_bot.validation import clean_required_text, format_mmdd, parse_date_range, parse_mmdd_date
 
 
 logger = logging.getLogger(__name__)
@@ -51,15 +52,15 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         ]
 
     @bot.tree.command(
-        name="register",
-        description="Register or update your main Ragnarok Online character.",
+        name="ลงทะเบียน",
+        description="ลงทะเบียนหรืออัปเดตตัวละครหลักของคุณใน Ragnarok Online",
         guild=guild,
     )
-    @app_commands.rename(character_class="class")
+    @app_commands.rename(character_name="ชื่อตัวละคร", character_class="อาชีพ", nickname="ชื่อเล่น")
     @app_commands.describe(
-        character_name="Your main character name.",
-        character_class="Your Ragnarok Online class.",
-        nickname="Your real nickname.",
+        character_name="ชื่อตัวละครหลักของคุณ",
+        character_class="อาชีพของคุณใน Ragnarok Online",
+        nickname="ชื่อเล่นจริงของคุณ",
     )
     @app_commands.autocomplete(character_class=class_autocomplete)
     async def register(
@@ -71,14 +72,14 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         try:
             character_name = clean_required_text(
                 character_name,
-                "character_name",
+                "ชื่อตัวละคร",
                 max_length=DISCORD_NICKNAME_MAX_LENGTH,
             )
-            nickname = clean_required_text(nickname, "nickname", max_length=60)
+            nickname = clean_required_text(nickname, "ชื่อเล่น", max_length=60)
             canonical_class = resolve_class(character_class)
             if canonical_class is None:
                 await interaction.response.send_message(
-                    "That class is not in the Classic + Trans class list. Pick one from autocomplete.",
+                    "อาชีพนี้ไม่อยู่ในรายชื่ออาชีพ Classic + Trans กรุณาเลือกจากตัวเลือกอัตโนมัติ",
                     ephemeral=True,
                 )
                 return
@@ -99,36 +100,39 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         except Exception:
             logger.exception("Failed to register member %s", interaction.user.id)
             await interaction.followup.send(
-                "Registration failed because Google Sheets could not be updated.",
+                "ลงทะเบียนไม่สำเร็จ เนื่องจากไม่สามารถอัปเดต Google Sheets ได้",
                 ephemeral=True,
             )
             return
 
         sync_notes = await _sync_discord_profile(bot, interaction, profile, sync_nickname=True, sync_class_role=True)
+        await _post_member_log(bot, interaction, profile, "ลงทะเบียนสมาชิกใหม่" if created else "อัปเดตข้อมูลการลงทะเบียน")
 
         if created:
             message = (
-                f"Registered **{profile.character_name}** as **{profile.character_class}** "
-                f"with nickname **{profile.real_nickname}**."
+                f"ลงทะเบียน **{profile.character_name}** เป็น **{profile.character_class}** "
+                f"ชื่อเล่น **{profile.real_nickname}** เรียบร้อยแล้ว รหัสสมาชิกของคุณคือ **{profile.member_id}**"
             )
         else:
             message = (
-                f"Updated your registration to **{profile.character_name}** "
-                f"(**{profile.character_class}**) with nickname **{profile.real_nickname}**."
+                f"อัปเดตข้อมูลลงทะเบียนของคุณเป็น **{profile.character_name}** "
+                f"(**{profile.character_class}**) ชื่อเล่น **{profile.real_nickname}** "
+                f"รหัสสมาชิกของคุณคือ **{profile.member_id}**"
             )
         await interaction.followup.send(_with_sync_notes(message, sync_notes), ephemeral=True)
 
     @bot.tree.command(
-        name="change-name",
-        description="Change your registered Ragnarok Online character name.",
+        name="เปลี่ยนชื่อ",
+        description="เปลี่ยนชื่อตัวละครหลักที่ลงทะเบียนไว้",
         guild=guild,
     )
-    @app_commands.describe(new_character_name="Your new main character name.")
+    @app_commands.rename(new_character_name="ชื่อใหม่")
+    @app_commands.describe(new_character_name="ชื่อตัวละครหลักใหม่ของคุณ")
     async def change_name(interaction: discord.Interaction, new_character_name: str) -> None:
         try:
             new_character_name = clean_required_text(
                 new_character_name,
-                "new_character_name",
+                "ชื่อใหม่",
                 max_length=DISCORD_NICKNAME_MAX_LENGTH,
             )
         except ValueError as exc:
@@ -145,33 +149,34 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         except Exception:
             logger.exception("Failed to change character name for %s", interaction.user.id)
             await interaction.followup.send(
-                "Name change failed because Google Sheets could not be updated.",
+                "เปลี่ยนชื่อไม่สำเร็จ เนื่องจากไม่สามารถอัปเดต Google Sheets ได้",
                 ephemeral=True,
             )
             return
 
         if profile is None:
-            await interaction.followup.send("You are not registered yet. Use `/register` first.", ephemeral=True)
+            await interaction.followup.send("คุณยังไม่ได้ลงทะเบียน กรุณาใช้คำสั่ง `/ลงทะเบียน` ก่อน", ephemeral=True)
             return
         sync_notes = await _sync_discord_profile(bot, interaction, profile, sync_nickname=True, sync_class_role=False)
+        await _post_member_log(bot, interaction, profile, "เปลี่ยนชื่อตัวละคร")
         await interaction.followup.send(
-            _with_sync_notes(f"Updated your character name to **{profile.character_name}**.", sync_notes),
+            _with_sync_notes(f"อัปเดตชื่อตัวละครของคุณเป็น **{profile.character_name}** เรียบร้อยแล้ว", sync_notes),
             ephemeral=True,
         )
 
     @bot.tree.command(
-        name="change-class",
-        description="Change your registered Ragnarok Online class.",
+        name="เปลี่ยนอาชีพ",
+        description="เปลี่ยนอาชีพที่ลงทะเบียนไว้",
         guild=guild,
     )
-    @app_commands.rename(new_character_class="new_class")
-    @app_commands.describe(new_character_class="Your new Ragnarok Online class.")
+    @app_commands.rename(new_character_class="อาชีพใหม่")
+    @app_commands.describe(new_character_class="อาชีพใหม่ของคุณ")
     @app_commands.autocomplete(new_character_class=class_autocomplete)
     async def change_class(interaction: discord.Interaction, new_character_class: str) -> None:
         canonical_class = resolve_class(new_character_class)
         if canonical_class is None:
             await interaction.response.send_message(
-                "That class is not in the Classic + Trans class list. Pick one from autocomplete.",
+                "อาชีพนี้ไม่อยู่ในรายชื่ออาชีพ Classic + Trans กรุณาเลือกจากตัวเลือกอัตโนมัติ",
                 ephemeral=True,
             )
             return
@@ -186,39 +191,48 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         except Exception:
             logger.exception("Failed to change class for %s", interaction.user.id)
             await interaction.followup.send(
-                "Class change failed because Google Sheets could not be updated.",
+                "เปลี่ยนอาชีพไม่สำเร็จ เนื่องจากไม่สามารถอัปเดต Google Sheets ได้",
                 ephemeral=True,
             )
             return
 
         if profile is None:
-            await interaction.followup.send("You are not registered yet. Use `/register` first.", ephemeral=True)
+            await interaction.followup.send("คุณยังไม่ได้ลงทะเบียน กรุณาใช้คำสั่ง `/ลงทะเบียน` ก่อน", ephemeral=True)
             return
         sync_notes = await _sync_discord_profile(bot, interaction, profile, sync_nickname=False, sync_class_role=True)
+        await _post_member_log(bot, interaction, profile, "เปลี่ยนอาชีพ")
         await interaction.followup.send(
-            _with_sync_notes(f"Updated your class to **{profile.character_class}**.", sync_notes),
+            _with_sync_notes(f"อัปเดตอาชีพของคุณเป็น **{profile.character_class}** เรียบร้อยแล้ว", sync_notes),
             ephemeral=True,
         )
 
     @bot.tree.command(
-        name="absence",
-        description="Request an absence and notify officers.",
+        name="ลา",
+        description="แจ้งลาและแจ้งเตือนหัวกิลด์",
         guild=guild,
     )
+    @app_commands.rename(reason="เหตุผล", start_date="วันเริ่ม", end_date="วันสิ้นสุด")
     @app_commands.describe(
-        start_date="First absence date, in YYYY-MM-DD format.",
-        end_date="Last absence date, in YYYY-MM-DD format.",
-        reason="Reason for the absence.",
+        reason="เหตุผลในการลา",
+        start_date="วันแรกที่ลา รูปแบบ MM/DD หากเว้นว่างไว้จะถือว่าลาวันนี้",
+        end_date="วันสุดท้ายที่ลา รูปแบบ MM/DD หากเว้นว่างไว้จะใช้วันเดียวกับวันเริ่ม",
     )
     async def absence(
         interaction: discord.Interaction,
-        start_date: str,
-        end_date: str,
         reason: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
     ) -> None:
         try:
-            parsed_start, parsed_end = parse_date_range(start_date, end_date)
-            reason = clean_required_text(reason, "reason", max_length=300)
+            if start_date is None and end_date is None:
+                parsed_start = parsed_end = date.today()
+            elif start_date is None:
+                raise ValueError("ต้องระบุวันเริ่ม หากมีการระบุวันสิ้นสุด")
+            elif end_date is None:
+                parsed_start = parsed_end = parse_mmdd_date(start_date, "วันเริ่ม")
+            else:
+                parsed_start, parsed_end = parse_date_range(start_date, end_date)
+            reason = clean_required_text(reason, "เหตุผล", max_length=300)
         except ValueError as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
             return
@@ -227,7 +241,7 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         try:
             member = await asyncio.to_thread(bot.store.get_member, interaction.user.id)
             if member is None:
-                await interaction.followup.send("You are not registered yet. Use `/register` first.", ephemeral=True)
+                await interaction.followup.send("คุณยังไม่ได้ลงทะเบียน กรุณาใช้คำสั่ง `/ลงทะเบียน` ก่อน", ephemeral=True)
                 return
             request = await asyncio.to_thread(
                 bot.store.append_absence,
@@ -239,7 +253,7 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         except Exception:
             logger.exception("Failed to create absence for %s", interaction.user.id)
             await interaction.followup.send(
-                "Absence request failed because Google Sheets could not be updated.",
+                "แจ้งลาไม่สำเร็จ เนื่องจากไม่สามารถอัปเดต Google Sheets ได้",
                 ephemeral=True,
             )
             return
@@ -247,14 +261,14 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         posted = await _post_absence_to_officer_channel(bot, interaction, member, request)
         if posted:
             await interaction.followup.send(
-                f"Absence request **{request.request_id}** submitted for "
-                f"{request.start_date.isoformat()} to {request.end_date.isoformat()}.",
+                f"ส่งคำขอลา **{request.request_id}** สำหรับวันที่ "
+                f"{format_mmdd(request.start_date)} ถึง {format_mmdd(request.end_date)} เรียบร้อยแล้ว",
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                f"Absence request **{request.request_id}** was saved, but I could not post to the officer channel. "
-                "Check `ABSENCE_CHANNEL_ID` and bot channel permissions.",
+                f"บันทึกคำขอลา **{request.request_id}** แล้ว แต่ไม่สามารถส่งข้อความไปยังห้องหัวกิลด์ได้ "
+                "กรุณาตรวจสอบ `ABSENCE_CHANNEL_ID` และสิทธิ์ของบอทในห้องนั้น",
                 ephemeral=True,
             )
 
@@ -271,16 +285,16 @@ async def _sync_discord_profile(
 ) -> list[str]:
     guild = interaction.guild
     if guild is None:
-        return ["Discord server profile sync skipped because this command was not used inside a server."]
+        return ["ข้ามการซิงค์โปรไฟล์ Discord เนื่องจากคำสั่งนี้ไม่ได้ใช้งานภายในเซิร์ฟเวอร์"]
 
     member = await _interaction_member(interaction)
     if member is None:
-        return ["Discord server profile sync skipped because I could not find your server member."]
+        return ["ข้ามการซิงค์โปรไฟล์ Discord เนื่องจากไม่พบข้อมูลสมาชิกของคุณในเซิร์ฟเวอร์"]
 
     bot_member = await _bot_member(bot, guild)
     notes: list[str] = []
     if sync_nickname:
-        note = await _sync_member_nickname(member, profile.character_name, bot_member)
+        note = await _sync_member_nickname(member, profile, bot_member)
         if note:
             notes.append(note)
     if sync_class_role:
@@ -316,27 +330,43 @@ async def _bot_member(bot: RagnarokGuildBot, guild: discord.Guild) -> discord.Me
 
 async def _sync_member_nickname(
     member: discord.Member,
-    character_name: str,
+    profile: MemberProfile,
     bot_member: discord.Member | None,
 ) -> str | None:
-    if member.display_name == character_name:
+    target_nickname = _format_discord_nickname(profile)
+    if member.display_name == target_nickname:
         return None
 
     if bot_member is not None:
         if not bot_member.guild_permissions.manage_nicknames:
-            return "Discord nickname was not changed: the bot needs `Manage Nicknames` permission."
+            return "ไม่ได้เปลี่ยนชื่อเล่นใน Discord: บอทต้องการสิทธิ์ `Manage Nicknames`"
         if member.id != bot_member.id and member.top_role >= bot_member.top_role:
-            return "Discord nickname was not changed: move the bot role above this member's highest role."
+            return "ไม่ได้เปลี่ยนชื่อเล่นใน Discord: กรุณาเลื่อนตำแหน่งโรลของบอทให้สูงกว่าโรลสูงสุดของสมาชิกคนนี้"
 
     try:
-        await member.edit(nick=character_name, reason="Ragnarok character name sync")
+        await member.edit(nick=target_nickname, reason="Ragnarok character name sync")
     except discord.Forbidden:
         logger.exception("Missing permission to edit nickname for %s", member.id)
-        return "Discord nickname was not changed: the bot needs `Manage Nicknames` and a higher role."
+        return "ไม่ได้เปลี่ยนชื่อเล่นใน Discord: บอทต้องการสิทธิ์ `Manage Nicknames` และโรลที่สูงกว่า"
     except discord.HTTPException:
         logger.exception("Discord rejected nickname edit for %s", member.id)
-        return "Discord nickname was not changed: Discord rejected the nickname update."
-    return "Discord nickname synced."
+        return "ไม่ได้เปลี่ยนชื่อเล่นใน Discord: Discord ปฏิเสธการอัปเดตชื่อเล่น"
+    return "ซิงค์ชื่อเล่นใน Discord เรียบร้อยแล้ว"
+
+
+def _format_discord_nickname(profile: MemberProfile) -> str:
+    prefix = f"[{profile.member_id}] {profile.character_name}" if profile.member_id else profile.character_name
+    if not profile.real_nickname:
+        return prefix[:DISCORD_NICKNAME_MAX_LENGTH]
+
+    full = f"{prefix} - {profile.real_nickname}"
+    if len(full) <= DISCORD_NICKNAME_MAX_LENGTH:
+        return full
+
+    available = DISCORD_NICKNAME_MAX_LENGTH - len(prefix) - len(" - ")
+    if available > 0:
+        return f"{prefix} - {profile.real_nickname[:available]}"
+    return prefix[:DISCORD_NICKNAME_MAX_LENGTH]
 
 
 async def _sync_member_class_role(
@@ -347,9 +377,9 @@ async def _sync_member_class_role(
     class_role_names = set(RO_CLASSES)
     target_role = discord.utils.get(member.guild.roles, name=character_class)
     if target_role is None:
-        return f"Discord class role was not changed: create a role named `{character_class}` first."
+        return f"ไม่ได้เปลี่ยนโรลอาชีพใน Discord: กรุณาสร้างโรลชื่อ `{character_class}` ก่อน"
     if target_role.managed:
-        return f"Discord class role was not changed: `{character_class}` is a managed role."
+        return f"ไม่ได้เปลี่ยนโรลอาชีพใน Discord: `{character_class}` เป็นโรลที่ถูกจัดการโดยระบบ (managed role)"
 
     old_class_roles = [
         role
@@ -363,9 +393,9 @@ async def _sync_member_class_role(
     roles_to_manage = old_class_roles + ([] if has_target_role else [target_role])
     if bot_member is not None:
         if not bot_member.guild_permissions.manage_roles:
-            return "Discord class role was not changed: the bot needs `Manage Roles` permission."
+            return "ไม่ได้เปลี่ยนโรลอาชีพใน Discord: บอทต้องการสิทธิ์ `Manage Roles`"
         if any(role >= bot_member.top_role for role in roles_to_manage):
-            return "Discord class role was not changed: move the bot role above all RO class roles."
+            return "ไม่ได้เปลี่ยนโรลอาชีพใน Discord: กรุณาเลื่อนตำแหน่งโรลของบอทให้สูงกว่าโรลอาชีพทั้งหมด"
 
     try:
         if not has_target_role:
@@ -374,11 +404,11 @@ async def _sync_member_class_role(
             await member.remove_roles(*old_class_roles, reason="Ragnarok character class sync")
     except discord.Forbidden:
         logger.exception("Missing permission to sync class role for %s", member.id)
-        return "Discord class role was not changed: the bot needs `Manage Roles` and a higher role."
+        return "ไม่ได้เปลี่ยนโรลอาชีพใน Discord: บอทต้องการสิทธิ์ `Manage Roles` และโรลที่สูงกว่า"
     except discord.HTTPException:
         logger.exception("Discord rejected class role sync for %s", member.id)
-        return "Discord class role was not changed: Discord rejected the role update."
-    return f"Discord class role synced to **{character_class}**."
+        return "ไม่ได้เปลี่ยนโรลอาชีพใน Discord: Discord ปฏิเสธการอัปเดตโรล"
+    return f"ซิงค์โรลอาชีพใน Discord เป็น **{character_class}** เรียบร้อยแล้ว"
 
 
 def _with_sync_notes(message: str, notes: list[str]) -> str:
@@ -388,44 +418,81 @@ def _with_sync_notes(message: str, notes: list[str]) -> str:
     return f"{message}\n\n{formatted_notes}"
 
 
+async def _get_log_channel(
+    bot: RagnarokGuildBot,
+    channel_id: int,
+    label: str,
+) -> discord.abc.Messageable | None:
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.DiscordException:
+            logger.exception("Could not fetch %s channel %s", label, channel_id)
+            return None
+
+    if not hasattr(channel, "send"):
+        logger.error("Configured %s channel %s is not messageable", label, channel_id)
+        return None
+    return channel
+
+
 async def _post_absence_to_officer_channel(
     bot: RagnarokGuildBot,
     interaction: discord.Interaction,
     member: MemberProfile,
     request: AbsenceRequest,
 ) -> bool:
-    channel = bot.get_channel(bot.config.absence_channel_id)
+    channel = await _get_log_channel(bot, bot.config.absence_channel_id, "absence")
     if channel is None:
-        try:
-            channel = await bot.fetch_channel(bot.config.absence_channel_id)
-        except discord.DiscordException:
-            logger.exception("Could not fetch absence channel %s", bot.config.absence_channel_id)
-            return False
-
-    if not hasattr(channel, "send"):
-        logger.error("Configured absence channel %s is not messageable", bot.config.absence_channel_id)
         return False
 
     embed = discord.Embed(
-        title="Absence Request",
+        title="คำขอลา",
         color=discord.Color.blue(),
     )
-    embed.add_field(name="Request ID", value=request.request_id, inline=False)
-    embed.add_field(name="Member", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
-    embed.add_field(name="Character", value=member.character_name, inline=True)
-    embed.add_field(name="Class", value=member.character_class, inline=True)
+    embed.add_field(name="รหัสคำขอ", value=request.request_id, inline=False)
+    embed.add_field(name="สมาชิก", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+    embed.add_field(name="ตัวละคร", value=member.character_name, inline=True)
+    embed.add_field(name="อาชีพ", value=member.character_class, inline=True)
     embed.add_field(
-        name="Dates",
-        value=f"{request.start_date.isoformat()} to {request.end_date.isoformat()}",
+        name="วันที่ลา",
+        value=f"{format_mmdd(request.start_date)} ถึง {format_mmdd(request.end_date)}",
         inline=False,
     )
-    embed.add_field(name="Reason", value=request.reason, inline=False)
-    embed.set_footer(text=f"Submitted at {request.submitted_at}")
+    embed.add_field(name="เหตุผล", value=request.reason, inline=False)
+    embed.set_footer(text=f"ส่งคำขอเมื่อ {request.submitted_at}")
 
     try:
         await channel.send(embed=embed)
     except discord.DiscordException:
         logger.exception("Could not post absence %s to officer channel", request.request_id)
+        return False
+    return True
+
+
+async def _post_member_log(
+    bot: RagnarokGuildBot,
+    interaction: discord.Interaction,
+    profile: MemberProfile,
+    action: str,
+) -> bool:
+    channel = await _get_log_channel(bot, bot.config.member_log_channel_id, "member log")
+    if channel is None:
+        return False
+
+    embed = discord.Embed(title=action, color=discord.Color.green())
+    embed.add_field(name="สมาชิก", value=f"{interaction.user.mention} (`{interaction.user.id}`)", inline=False)
+    embed.add_field(name="รหัสสมาชิก", value=profile.member_id or "-", inline=True)
+    embed.add_field(name="ตัวละคร", value=profile.character_name, inline=True)
+    embed.add_field(name="อาชีพ", value=profile.character_class, inline=True)
+    embed.add_field(name="ชื่อเล่น", value=profile.real_nickname, inline=True)
+    embed.set_footer(text=f"อัปเดตเมื่อ {profile.updated_at}")
+
+    try:
+        await channel.send(embed=embed)
+    except discord.DiscordException:
+        logger.exception("Could not post member log for %s", interaction.user.id)
         return False
     return True
 

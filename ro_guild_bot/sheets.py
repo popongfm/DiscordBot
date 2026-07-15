@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -21,7 +22,10 @@ MEMBER_HEADERS = [
     "Real Nickname",
     "Created At",
     "Updated At",
+    "Member ID",
 ]
+
+_MEMBER_ID_RE = re.compile(r"^P(\d+)$", re.IGNORECASE)
 
 ABSENCE_HEADERS = [
     "Request ID",
@@ -43,6 +47,7 @@ class MemberProfile:
     real_nickname: str
     created_at: str
     updated_at: str
+    member_id: str = ""
 
     @classmethod
     def from_row(cls, row: list[str]) -> "MemberProfile":
@@ -55,6 +60,7 @@ class MemberProfile:
             real_nickname=str(padded[4]).strip(),
             created_at=str(padded[5]).strip(),
             updated_at=str(padded[6]).strip(),
+            member_id=str(padded[7]).strip(),
         )
 
     def to_row(self) -> list[str]:
@@ -66,6 +72,7 @@ class MemberProfile:
             self.real_nickname,
             self.created_at,
             self.updated_at,
+            self.member_id,
         ]
 
 
@@ -96,6 +103,7 @@ class GuildSheetStore:
         self.spreadsheet = spreadsheet
         self.members = self._ensure_worksheet(MEMBERS_SHEET, MEMBER_HEADERS)
         self.absences = self._ensure_worksheet(ABSENCES_SHEET, ABSENCE_HEADERS)
+        self._backfill_member_ids()
 
     @classmethod
     def from_service_account_file(
@@ -150,6 +158,7 @@ class GuildSheetStore:
                 real_nickname=real_nickname,
                 created_at=now,
                 updated_at=now,
+                member_id=self._allocate_member_id(),
             )
             self.members.append_row(profile.to_row(), value_input_option="RAW")
             return profile, True
@@ -163,6 +172,7 @@ class GuildSheetStore:
             real_nickname=real_nickname,
             created_at=existing.created_at or now,
             updated_at=now,
+            member_id=existing.member_id or self._allocate_member_id(),
         )
         self._write_member(row_number, profile)
         return profile, False
@@ -235,6 +245,7 @@ class GuildSheetStore:
             real_nickname=existing.real_nickname,
             created_at=existing.created_at,
             updated_at=_utc_now(),
+            member_id=existing.member_id or self._allocate_member_id(),
         )
         self._write_member(row_number, updated)
         return updated
@@ -243,9 +254,47 @@ class GuildSheetStore:
         row_range = f"A{row_number}:{_column_name(len(MEMBER_HEADERS))}{row_number}"
         self.members.update([profile.to_row()], row_range)
 
+    def _allocate_member_id(self) -> str:
+        member_id_col = MEMBER_HEADERS.index("Member ID") + 1
+        existing_numbers = [
+            int(match.group(1))
+            for value in self.members.col_values(member_id_col)[1:]
+            if (match := _MEMBER_ID_RE.match(value.strip()))
+        ]
+        return _format_member_id(max(existing_numbers, default=0) + 1)
+
+    def _backfill_member_ids(self) -> None:
+        member_id_col = MEMBER_HEADERS.index("Member ID") + 1
+        data_rows = self.members.get_all_values()[1:]
+        if not data_rows:
+            return
+
+        existing_numbers = [
+            int(match.group(1))
+            for row in data_rows
+            if len(row) >= member_id_col
+            and (match := _MEMBER_ID_RE.match(row[member_id_col - 1].strip()))
+        ]
+        next_number = max(existing_numbers, default=0) + 1
+
+        updates = []
+        for offset, row in enumerate(data_rows):
+            value = row[member_id_col - 1] if len(row) >= member_id_col else ""
+            if not value.strip():
+                row_number = offset + 2
+                cell = f"{_column_name(member_id_col)}{row_number}"
+                updates.append({"range": cell, "values": [[_format_member_id(next_number)]]})
+                next_number += 1
+        if updates:
+            self.members.batch_update(updates)
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _format_member_id(number: int) -> str:
+    return f"P{number:03d}"
 
 
 def _request_id() -> str:

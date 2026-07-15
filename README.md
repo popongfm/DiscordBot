@@ -4,12 +4,12 @@ Python Discord bot for one Ragnarok Online guild. It uses slash commands and sto
 
 ## Commands
 
-- `/register character_name class nickname` registers or updates your main character.
-- `/change-name new_character_name` changes your registered character name.
-- `/change-class new_class` changes your registered RO class.
-- `/absence start_date end_date reason` logs an absence request and posts it to the officer channel.
+- `/ลงทะเบียน ชื่อตัวละคร อาชีพ ชื่อเล่น` registers or updates your main character.
+- `/เปลี่ยนชื่อ ชื่อใหม่` changes your registered character name.
+- `/เปลี่ยนอาชีพ อาชีพใหม่` changes your registered RO class.
+- `/ลา เหตุผล วันเริ่ม วันสิ้นสุด` logs an absence request and posts it to the officer channel.
 
-Dates use `YYYY-MM-DD`. Character names are limited to 32 characters because Discord server nicknames have the same limit.
+Dates use `MM/DD` (year is assumed to be the current year). Character names are limited to 32 characters because Discord server nicknames have the same limit.
 
 When a member registers or changes their profile, the bot also tries to sync Discord:
 
@@ -62,6 +62,7 @@ When a member registers or changes their profile, the bot also tries to sync Dis
    - `DISCORD_TOKEN`
    - `DISCORD_GUILD_ID`
    - `ABSENCE_CHANNEL_ID`
+   - `MEMBER_LOG_CHANNEL_ID`
    - `GOOGLE_SHEET_ID`
    - `GOOGLE_SERVICE_ACCOUNT_FILE`
 
