@@ -19,6 +19,7 @@ from ro_guild_bot.validation import clean_required_text, format_mmdd, parse_date
 
 logger = logging.getLogger(__name__)
 DISCORD_NICKNAME_MAX_LENGTH = 32
+BASE_ROLE_NAME = "BABYBEAR | ROW"
 
 
 class RagnarokGuildBot(commands.Bot):
@@ -105,7 +106,9 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
             )
             return
 
-        sync_notes = await _sync_discord_profile(bot, interaction, profile, sync_nickname=True, sync_class_role=True)
+        sync_notes = await _sync_discord_profile(
+            bot, interaction, profile, sync_nickname=True, sync_class_role=True, sync_base_role=True
+        )
         await _post_member_log(bot, interaction, profile, "ลงทะเบียนสมาชิกใหม่" if created else "อัปเดตข้อมูลการลงทะเบียน")
 
         if created:
@@ -282,6 +285,7 @@ async def _sync_discord_profile(
     *,
     sync_nickname: bool,
     sync_class_role: bool,
+    sync_base_role: bool = False,
 ) -> list[str]:
     guild = interaction.guild
     if guild is None:
@@ -299,6 +303,10 @@ async def _sync_discord_profile(
             notes.append(note)
     if sync_class_role:
         note = await _sync_member_class_role(member, profile.character_class, bot_member)
+        if note:
+            notes.append(note)
+    if sync_base_role:
+        note = await _sync_base_role(member, bot_member)
         if note:
             notes.append(note)
     return notes
@@ -409,6 +417,35 @@ async def _sync_member_class_role(
         logger.exception("Discord rejected class role sync for %s", member.id)
         return "ไม่ได้เปลี่ยนโรลอาชีพใน Discord: Discord ปฏิเสธการอัปเดตโรล"
     return f"ซิงค์โรลอาชีพใน Discord เป็น **{character_class}** เรียบร้อยแล้ว"
+
+
+async def _sync_base_role(
+    member: discord.Member,
+    bot_member: discord.Member | None,
+) -> str | None:
+    target_role = discord.utils.get(member.guild.roles, name=BASE_ROLE_NAME)
+    if target_role is None:
+        return f"ไม่ได้เพิ่มโรล Discord: กรุณาสร้างโรลชื่อ `{BASE_ROLE_NAME}` ก่อน"
+    if target_role in member.roles:
+        return None
+    if target_role.managed:
+        return f"ไม่ได้เพิ่มโรล Discord: `{BASE_ROLE_NAME}` เป็นโรลที่ถูกจัดการโดยระบบ (managed role)"
+
+    if bot_member is not None:
+        if not bot_member.guild_permissions.manage_roles:
+            return "ไม่ได้เพิ่มโรล Discord: บอทต้องการสิทธิ์ `Manage Roles`"
+        if target_role >= bot_member.top_role:
+            return f"ไม่ได้เพิ่มโรล Discord: กรุณาเลื่อนตำแหน่งโรลของบอทให้สูงกว่า `{BASE_ROLE_NAME}`"
+
+    try:
+        await member.add_roles(target_role, reason="Ragnarok guild base role grant")
+    except discord.Forbidden:
+        logger.exception("Missing permission to grant base role for %s", member.id)
+        return f"ไม่ได้เพิ่มโรล Discord: บอทต้องการสิทธิ์ `Manage Roles` และโรลที่สูงกว่า"
+    except discord.HTTPException:
+        logger.exception("Discord rejected base role grant for %s", member.id)
+        return "ไม่ได้เพิ่มโรล Discord: Discord ปฏิเสธการเพิ่มโรล"
+    return f"เพิ่มโรล Discord `{BASE_ROLE_NAME}` เรียบร้อยแล้ว"
 
 
 def _with_sync_notes(message: str, notes: list[str]) -> str:
