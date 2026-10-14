@@ -15,6 +15,10 @@ class BotConfig:
     member_log_channel_id: int
     google_sheet_id: str
     google_service_account_file: Path
+    # The dedicated channel where registration requests wait for a decision.
+    register_approval_channel_id: int
+    # Who may decide. Optional: an unset role means "anyone with Manage Roles".
+    register_approver_role_id: int | None = None
 
 
 def _required(name: str) -> str:
@@ -32,6 +36,16 @@ def _required_int(name: str) -> int:
         raise RuntimeError(f"{name} must be a Discord numeric ID") from exc
 
 
+def _optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a Discord numeric ID") from exc
+
+
 def load_config() -> BotConfig:
     load_dotenv()
 
@@ -42,4 +56,6 @@ def load_config() -> BotConfig:
         member_log_channel_id=_required_int("MEMBER_LOG_CHANNEL_ID"),
         google_sheet_id=_required("GOOGLE_SHEET_ID"),
         google_service_account_file=Path(_required("GOOGLE_SERVICE_ACCOUNT_FILE")),
+        register_approval_channel_id=_required_int("REGISTER_APPROVAL_CHANNEL_ID"),
+        register_approver_role_id=_optional_int("REGISTER_APPROVER_ROLE_ID"),
     )
