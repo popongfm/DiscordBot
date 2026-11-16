@@ -332,6 +332,21 @@ class GuildSheetStore:
                 )
             return profile, False
 
+    def character_names_by_user_id(self) -> dict[str, str]:
+        """Map every registered Discord user ID to its character name.
+
+        One read of the Members sheet, so labelling a whole voice channel costs
+        a single API call however many people are in it. Read-only.
+        """
+        with self._lock:
+            rows = _call(self.members.get_all_values)[1:]
+        names: dict[str, str] = {}
+        for row in rows:
+            profile = MemberProfile.from_row(row)
+            if profile.discord_user_id and profile.character_name:
+                names[profile.discord_user_id] = profile.character_name
+        return names
+
     def update_character_name(
         self,
         discord_user_id: str | int,

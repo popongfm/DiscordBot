@@ -8,6 +8,7 @@ Python Discord bot for one Ragnarok Online guild. It uses slash commands and sto
 - `/เปลี่ยนชื่อ ชื่อใหม่` changes your registered character name.
 - `/เปลี่ยนอาชีพ อาชีพใหม่` changes your registered RO class.
 - `/ลา เหตุผล วันเริ่ม วันสิ้นสุด` logs an absence request and posts it to the officer channel.
+- `/นับคน` counts the people in one or more voice channels and posts a record to the voice-log channel (Manage Roles only, see below).
 
 Each command is also registered under an English name, with English options and replies. The two versions share one implementation, so they behave identically:
 
@@ -15,6 +16,7 @@ Each command is also registered under an English name, with English options and 
 - `/change-name new_name`
 - `/change-class new_class`
 - `/absence reason start_date end_date`
+- `/voice-count`
 
 Messages posted to the member-log and officer channels stay in Thai no matter which version a member uses, so those channels read consistently.
 
@@ -29,6 +31,16 @@ Messages posted to the member-log and officer channels stay in Thai no matter wh
 - Two officers pressing a button at once cannot both win: the first press claims the request, and the second is told it was already decided.
 
 Approvers are the members holding `REGISTER_APPROVER_ROLE_ID`, or — when that is unset — anyone with the Manage Roles permission. Server administrators always qualify.
+
+## Voice-channel head count
+
+`/นับคน` (`/voice-count`) records who is in the guild's voice channels, e.g. for war or event attendance.
+
+- Only members with the **Manage Roles** permission (administrators included) can see or run it. Server admins can change who sees it under Server Settings → Integrations.
+- The bot replies privately with a menu of voice channels. Pick 1–25 channels and close the menu; the channel you are in is pre-selected. The count is taken at that moment. The menu expires after 3 minutes and records nothing.
+- The record is posted to `VOICE_LOG_CHANNEL_ID`: the total, a section per channel with each person's mention and — if registered — their character name from `Members`, who ran it, and the time in Asia/Bangkok (GMT+7). Bots in the channel are not counted; an empty channel is recorded as 0. Mentions in the record do not ping anyone.
+- Very large counts are split across several messages to stay within Discord's limits.
+- If `Members` cannot be read, the record is still posted, just without character names.
 
 Dates use `MM/DD` (year is assumed to be the current year). Character names are limited to 32 characters because Discord server nicknames have the same limit.
 
@@ -56,6 +68,7 @@ When a member registers or changes their profile, the bot also tries to sync Dis
    - Embed Links
    - Manage Nicknames
    - Manage Roles
+   - View Channel on the voice channels you want to count
 
    Put the bot's Discord role above your member roles and above every RO class role it should manage.
 
@@ -93,6 +106,7 @@ When a member registers or changes their profile, the bot also tries to sync Dis
    Optional:
 
    - `REGISTER_APPROVER_ROLE_ID` — the role allowed to approve or reject. Falls back to the Manage Roles permission.
+   - `VOICE_LOG_CHANNEL_ID` — the text channel where `/voice-count` posts its records. Until it is set, the command replies that it is not configured.
 
 7. Run the bot.
 
@@ -104,7 +118,7 @@ Guild-scoped slash commands are synced when the bot starts, so command changes s
 
 ## Local Tests
 
-The pure validation tests do not need Discord or Google credentials.
+The tests (validation and `/voice-count`) do not need Discord or Google credentials.
 
 ```bash
 python3 -m unittest
