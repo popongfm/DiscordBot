@@ -19,6 +19,9 @@ class BotConfig:
     register_approval_channel_id: int
     # Who may decide. Optional: an unset role means "anyone with Manage Roles".
     register_approver_role_id: int | None = None
+    # Where /voice-count posts its records. Optional so an existing deployment
+    # without it still starts; the command explains what to set instead.
+    voice_log_channel_id: int | None = None
 
 
 def _required(name: str) -> str:
@@ -58,4 +61,5 @@ def load_config() -> BotConfig:
         google_service_account_file=Path(_required("GOOGLE_SERVICE_ACCOUNT_FILE")),
         register_approval_channel_id=_required_int("REGISTER_APPROVAL_CHANNEL_ID"),
         register_approver_role_id=_optional_int("REGISTER_APPROVER_ROLE_ID"),
+        voice_log_channel_id=_optional_int("VOICE_LOG_CHANNEL_ID"),
     )

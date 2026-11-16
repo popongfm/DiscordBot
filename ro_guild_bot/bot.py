@@ -7,7 +7,9 @@ import re
 import socket
 import ssl
 import time
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import certifi
@@ -33,6 +35,17 @@ DISCORD_NICKNAME_MAX_LENGTH = 32
 BASE_ROLE_NAME = "BABYBEAR | ROW"
 BACKUP_DIR = "backups"
 BACKUP_MIN_INTERVAL_SECONDS = 30.0  # debounce: at most one CSV backup per window
+
+# --- Voice-channel head count ----------------------------------------------
+# Records are stamped in the guild's local time, not UTC like the sheets.
+GUILD_TIMEZONE = ZoneInfo("Asia/Bangkok")
+VOICE_COUNT_MAX_CHANNELS = 25          # Discord's limit for one select menu
+VOICE_COUNT_MENU_TIMEOUT_SECONDS = 180.0
+# Discord caps a field value at 1024 chars and one message's embeds at 6000
+# chars in total; stay a little under both.
+EMBED_FIELD_VALUE_LIMIT = 1000
+EMBED_FIELDS_LIMIT = 25
+EMBED_CHAR_BUDGET = 5500
 
 # --- Startup/login retry backoff -------------------------------------------
 # Keeping the retry loop inside one long-lived process (rather than letting the
@@ -127,6 +140,23 @@ _MSG: dict[str, dict[str, str]] = {
         "base_role_added": "เพิ่มโรล Discord `{role}` เรียบร้อยแล้ว",
         "sync_skipped_dm": "ข้ามการซิงค์โปรไฟล์ Discord เนื่องจากคำสั่งนี้ไม่ได้ใช้งานภายในเซิร์ฟเวอร์",
         "sync_skipped_no_member": "ข้ามการซิงค์โปรไฟล์ Discord เนื่องจากไม่พบข้อมูลสมาชิกของคุณในเซิร์ฟเวอร์",
+        "voice_guild_only": "คำสั่งนี้ใช้ได้เฉพาะภายในเซิร์ฟเวอร์",
+        "voice_no_permission": "คำสั่งนี้ใช้ได้เฉพาะผู้ที่มีสิทธิ์ `Manage Roles`",
+        "voice_log_not_configured": (
+            "ยังไม่ได้ตั้งค่าห้องบันทึกจำนวนคน กรุณาให้แอดมินตั้งค่า `VOICE_LOG_CHANNEL_ID`"
+        ),
+        "voice_pick_prompt": (
+            "เลือก voice channel ที่ต้องการนับ (สูงสุด {max_channels} ห้อง) "
+            "แล้วปิดเมนูเพื่อบันทึก บอทจะนับคน ณ ตอนที่กดยืนยัน เมนูนี้หมดอายุใน 3 นาที"
+        ),
+        "voice_select_placeholder": "เลือก voice channel",
+        "voice_expired": "เมนูหมดอายุแล้ว ไม่ได้บันทึกอะไร กรุณาใช้คำสั่งใหม่อีกครั้ง",
+        "voice_channels_gone": "ไม่พบห้องที่เลือก (อาจถูกลบไปแล้ว) กรุณาใช้คำสั่งใหม่อีกครั้ง",
+        "voice_done": "บันทึกแล้ว: **{total}** คน จาก **{rooms}** ห้อง {link}",
+        "voice_post_failed": (
+            "นับได้ **{total}** คน จาก **{rooms}** ห้อง แต่ไม่สามารถโพสต์ลงห้องบันทึกได้ "
+            "กรุณาตรวจสอบ `VOICE_LOG_CHANNEL_ID` และสิทธิ์ของบอทในห้องนั้น"
+        ),
     },
     "en": {
         "field_character_name": "character name",
@@ -198,6 +228,24 @@ _MSG: dict[str, dict[str, str]] = {
         "base_role_added": "Added the Discord role `{role}`.",
         "sync_skipped_dm": "Skipped the Discord profile sync because this command was not used inside the server.",
         "sync_skipped_no_member": "Skipped the Discord profile sync because your member record could not be found in the server.",
+        "voice_guild_only": "This command can only be used inside the server.",
+        "voice_no_permission": "Only members with the `Manage Roles` permission can use this command.",
+        "voice_log_not_configured": (
+            "The voice-count log channel is not set up yet. Please ask an admin to set "
+            "`VOICE_LOG_CHANNEL_ID`."
+        ),
+        "voice_pick_prompt": (
+            "Pick the voice channels to count (up to {max_channels}), then close the menu to "
+            "record them. The count is taken when you confirm. This menu expires in 3 minutes."
+        ),
+        "voice_select_placeholder": "Pick voice channels",
+        "voice_expired": "The menu expired and nothing was recorded. Please run the command again.",
+        "voice_channels_gone": "The selected channels could not be found (they may have been deleted). Please run the command again.",
+        "voice_done": "Recorded **{total}** people across **{rooms}** channels. {link}",
+        "voice_post_failed": (
+            "Counted **{total}** people across **{rooms}** channels, but the record could not be "
+            "posted. Please check `VOICE_LOG_CHANNEL_ID` and the bot's permissions in that channel."
+        ),
     },
 }
 
@@ -528,6 +576,31 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
             ephemeral=True,
         )
 
+    async def _voice_count_impl(interaction: discord.Interaction, lang: str) -> None:
+        text = _MSG[lang]
+        member = interaction.user
+        if interaction.guild is None or not isinstance(member, discord.Member):
+            await interaction.response.send_message(text["voice_guild_only"], ephemeral=True)
+            return
+        # default_permissions already hides the command from everyone else;
+        # this re-check covers server admins re-granting it per channel/role.
+        if not _may_count_voice(member):
+            await interaction.response.send_message(text["voice_no_permission"], ephemeral=True)
+            return
+        if bot.config.voice_log_channel_id is None:
+            await interaction.response.send_message(text["voice_log_not_configured"], ephemeral=True)
+            return
+
+        current = member.voice.channel if member.voice else None
+        preselect = current if isinstance(current, discord.VoiceChannel) else None
+        view = VoiceCountView(bot, member.id, lang, preselect)
+        await interaction.response.send_message(
+            text["voice_pick_prompt"].format(max_channels=VOICE_COUNT_MAX_CHANNELS),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
     # --- Thai commands ------------------------------------------------------
 
     @bot.tree.command(
@@ -647,6 +720,26 @@ def create_bot(config: BotConfig, store: GuildSheetStore) -> RagnarokGuildBot:
         end_date: str | None = None,
     ) -> None:
         await _absence_impl(interaction, reason, start_date, end_date, "en")
+
+    # --- Voice head count (both languages) ----------------------------------
+
+    @bot.tree.command(
+        name="นับคน",
+        description="นับจำนวนคนใน voice channel และบันทึกลงห้อง log (เฉพาะผู้มีสิทธิ์ Manage Roles)",
+        guild=guild,
+    )
+    @app_commands.default_permissions(manage_roles=True)
+    async def voice_count(interaction: discord.Interaction) -> None:
+        await _voice_count_impl(interaction, "th")
+
+    @bot.tree.command(
+        name="voice-count",
+        description="Count the people in voice channels and post a record (Manage Roles only)",
+        guild=guild,
+    )
+    @app_commands.default_permissions(manage_roles=True)
+    async def voice_count_en(interaction: discord.Interaction) -> None:
+        await _voice_count_impl(interaction, "en")
 
     return bot
 
@@ -1280,6 +1373,240 @@ async def _post_member_log(
         logger.exception("Could not post member log for %s", member_reference)
         return False
     return True
+
+
+# --- Voice-channel head count ---------------------------------------------
+# Split into three steps so future triggers (a timed auto-count, a join/leave
+# logger) can reuse them: take a snapshot -> build embeds -> post them.
+
+
+@dataclass(frozen=True)
+class VoiceRoomSnapshot:
+    channel_id: int
+    channel_name: str
+    user_ids: tuple[int, ...]  # humans only, in Discord's member order
+
+    @property
+    def count(self) -> int:
+        return len(self.user_ids)
+
+
+def _may_count_voice(member: discord.Member) -> bool:
+    # guild_permissions reports every permission for administrators.
+    return member.guild_permissions.manage_roles
+
+
+def _snapshot_voice_channel(channel: discord.VoiceChannel) -> VoiceRoomSnapshot:
+    """Who is in the channel right now, bots excluded."""
+    return VoiceRoomSnapshot(
+        channel_id=channel.id,
+        channel_name=channel.name,
+        user_ids=tuple(m.id for m in channel.members if not m.bot),
+    )
+
+
+def _format_guild_time(moment: datetime) -> str:
+    return moment.astimezone(GUILD_TIMEZONE).strftime("%d/%m/%Y %H:%M:%S") + " (GMT+7)"
+
+
+def _voice_member_line(position: int, user_id: int, names: dict[str, str]) -> str:
+    character = names.get(str(user_id))
+    line = f"{position}. <@{user_id}>"
+    if character:
+        line += f" — {discord.utils.escape_markdown(character)}"
+    return line
+
+
+def _chunk_lines(lines: list[str], limit: int) -> list[str]:
+    """Join lines into blocks no longer than ``limit`` characters each."""
+    blocks: list[str] = []
+    current = ""
+    for line in lines:
+        line = line[:limit]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > limit:
+            blocks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _build_voice_log_embeds(
+    rooms: list[VoiceRoomSnapshot],
+    names: dict[str, str],
+    requested_by: str,
+    taken_at: datetime,
+) -> list[discord.Embed]:
+    """Render a head count as one or more embeds, each safe to send alone.
+
+    Staff-facing, so Thai regardless of the command's language — like the
+    member log. A room too long for one field continues in the next field
+    ("(ต่อ)"); when an embed fills up, the rest goes into another embed, to be
+    sent as its own message because Discord's 6000-char cap is per message.
+    """
+    total = sum(room.count for room in rooms)
+
+    fields: list[tuple[str, str]] = []
+    for room in rooms:
+        room_name = discord.utils.escape_markdown(room.channel_name)
+        heading = f"🔊 {room_name} — {room.count} คน"
+        if not room.user_ids:
+            fields.append((heading, "— ไม่มีคนในห้อง —"))
+            continue
+        lines = [
+            _voice_member_line(position, user_id, names)
+            for position, user_id in enumerate(room.user_ids, start=1)
+        ]
+        for index, block in enumerate(_chunk_lines(lines, EMBED_FIELD_VALUE_LIMIT)):
+            fields.append((heading if index == 0 else f"{heading} (ต่อ)", block))
+
+    def new_embed(title: str, description: str | None) -> discord.Embed:
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=discord.Color.purple(),
+            timestamp=taken_at,
+        )
+        return embed
+
+    first = new_embed(
+        "บันทึกจำนวนคนใน Voice Channel",
+        (
+            f"รวม **{total}** คน จาก **{len(rooms)}** ห้อง\n"
+            f"ผู้บันทึก: {requested_by}\n"
+            f"เวลา: {_format_guild_time(taken_at)}"
+        ),
+    )
+    embeds = [first]
+    current = first
+    for name, value in fields:
+        too_many_fields = len(current.fields) >= EMBED_FIELDS_LIMIT
+        too_long = len(current) + len(name) + len(value) > EMBED_CHAR_BUDGET
+        if too_many_fields or too_long:
+            current = new_embed("บันทึกจำนวนคนใน Voice Channel (ต่อ)", None)
+            embeds.append(current)
+        current.add_field(name=name, value=value, inline=False)
+
+    if len(embeds) > 1:
+        for number, embed in enumerate(embeds, start=1):
+            embed.set_footer(text=f"หน้า {number}/{len(embeds)}")
+    return embeds
+
+
+async def _post_voice_log(
+    bot: RagnarokGuildBot,
+    embeds: list[discord.Embed],
+) -> discord.Message | None:
+    """Send each embed as its own message; return the first (for its link)."""
+    channel_id = bot.config.voice_log_channel_id
+    if channel_id is None:
+        return None
+    channel = await _get_log_channel(bot, channel_id, "voice log")
+    if channel is None:
+        return None
+
+    first: discord.Message | None = None
+    try:
+        for embed in embeds:
+            message = await channel.send(
+                embed=embed, allowed_mentions=discord.AllowedMentions.none()
+            )
+            first = first or message
+    except discord.DiscordException:
+        logger.exception("Could not post voice count to channel %s", channel_id)
+        return None
+    return first
+
+
+class VoiceCountView(discord.ui.View):
+    """The ephemeral channel picker behind /นับคน and /voice-count.
+
+    Short-lived on purpose: unlike the approval buttons it is not rebuilt after
+    a restart — the requester just runs the command again.
+    """
+
+    def __init__(
+        self,
+        bot: RagnarokGuildBot,
+        requester_id: int,
+        lang: str,
+        preselect: discord.VoiceChannel | None,
+    ) -> None:
+        super().__init__(timeout=VOICE_COUNT_MENU_TIMEOUT_SECONDS)
+        self.bot = bot
+        self.requester_id = requester_id
+        self.lang = lang
+        self.message: discord.InteractionMessage | None = None
+        self.done = False
+
+        self.picker: discord.ui.ChannelSelect = discord.ui.ChannelSelect(
+            channel_types=[discord.ChannelType.voice],
+            placeholder=_MSG[lang]["voice_select_placeholder"],
+            min_values=1,
+            max_values=VOICE_COUNT_MAX_CHANNELS,
+            default_values=[preselect] if preselect is not None else [],
+        )
+        self.picker.callback = self._on_pick
+        self.add_item(self.picker)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.user.id == self.requester_id
+
+    async def _on_pick(self, interaction: discord.Interaction) -> None:
+        text = _MSG[self.lang]
+        if self.done:
+            return
+        self.done = True
+        self.stop()
+
+        # Count first, before any slow call, so the record reflects the
+        # moment the menu was confirmed.
+        taken_at = datetime.now(GUILD_TIMEZONE)
+        rooms: list[VoiceRoomSnapshot] = []
+        for picked in self.picker.values:
+            channel = picked.resolve() or (
+                interaction.guild.get_channel(picked.id) if interaction.guild else None
+            )
+            if isinstance(channel, discord.VoiceChannel):
+                rooms.append(_snapshot_voice_channel(channel))
+
+        await interaction.response.defer()
+        if not rooms:
+            await interaction.edit_original_response(content=text["voice_channels_gone"], view=None)
+            return
+
+        try:
+            names = await asyncio.to_thread(self.bot.store.character_names_by_user_id)
+        except Exception:
+            # Names are a nicety; a sheet outage must not lose the head count.
+            logger.exception("voice_count: could not read character names; posting without them")
+            names = {}
+
+        total = sum(room.count for room in rooms)
+        embeds = _build_voice_log_embeds(rooms, names, interaction.user.mention, taken_at)
+        first = await _post_voice_log(self.bot, embeds)
+        logger.info(
+            "voice_count: %s people in %s channels by %s (%s) — log %s",
+            total, len(rooms), interaction.user, interaction.user.id,
+            "POSTED" if first else "UNSUCCESSFUL",
+        )
+
+        if first is None:
+            content = text["voice_post_failed"].format(total=total, rooms=len(rooms))
+        else:
+            content = text["voice_done"].format(total=total, rooms=len(rooms), link=first.jump_url)
+        await interaction.edit_original_response(content=content, view=None)
+
+    async def on_timeout(self) -> None:
+        if self.done or self.message is None:
+            return
+        try:
+            await self.message.edit(content=_MSG[self.lang]["voice_expired"], view=None)
+        except discord.DiscordException:
+            pass
 
 
 def _display_name(interaction: discord.Interaction) -> str:

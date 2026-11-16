@@ -15,3 +15,10 @@ env/
 /env
 *.json
 !**/package*.json
+
+# Task Observer skill-observation log (local only)
+/skill-observations/
+
+# Local-only artifacts
+/ro_guild_bot.zip
+.archify/
